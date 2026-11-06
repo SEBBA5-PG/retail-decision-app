@@ -19,9 +19,10 @@ R_NO_PRODUCTO = "StockCode que no es un producto"
 R_DESC_NUMERICA = "Description solo numérica"
 R_DESC_VARIAS = "StockCode con varias Description"
 
-# Si menos del 90 % de los códigos sigue el patrón de UCI, se usa una regla general:
-# código sin ningún dígito o con palabras de servicio (envío, comisión, ajuste, prueba, vale).
-GENERICO_NO_PRODUCTO = r"(?i)^(gift|test|adjust|amazonfee|bank charges|postage|manual|dotcom|shipping|envio|flete)"
+# Si menos del 90 % de los códigos sigue el patrón de UCI, se usa una regla general que solo aparta
+# códigos que empiezan con palabras de servicio (envío, comisión, ajuste, prueba, vale). Un código
+# sin dígitos puede ser un producto legítimo (a veces el código es el nombre), así que no se usa.
+GENERICO_NO_PRODUCTO = r"(?i)^(gift|test|adjust|amazonfee|bank charges|post|manual|dot\b|dotcom|shipping|envio|flete)"
 
 # Reglas que deben quedar en cero para considerar el dataset limpio de errores.
 REGLAS_DE_NEGOCIO = (R_CANTIDAD, R_PRECIO, R_NO_PRODUCTO, R_DESC_NUMERICA)
@@ -59,14 +60,15 @@ def es_producto(df: pd.DataFrame) -> pd.Series:
     if segun_patron.mean() >= 0.9:
         validas = segun_patron
     else:
-        validas = categorias.str.contains(r"\d") & ~categorias.str.match(GENERICO_NO_PRODUCTO)
+        validas = ~categorias.str.match(GENERICO_NO_PRODUCTO)
     codigos = codigo.cat.codes.to_numpy()
     resultado = np.where(codigos >= 0, validas.to_numpy(bool)[codigos], False)
     return pd.Series(resultado, index=df.index)
 
 
-def _es_cancelacion(df: pd.DataFrame) -> pd.Series:
-    return df["Invoice"].astype(str).str.startswith("C")
+def es_cancelacion(df: pd.DataFrame) -> pd.Series:
+    """Factura de cancelación: una «C» seguida de dígitos (C581484). Así «CA-2016-152156» no cuenta."""
+    return df["Invoice"].str.match(r"^C\d")
 
 
 def detectar_problemas(df: pd.DataFrame) -> dict[str, pd.Series]:
@@ -76,7 +78,7 @@ def detectar_problemas(df: pd.DataFrame) -> dict[str, pd.Series]:
     para que la interfaz muestre que se evaluó y pasó.
     """
     descripcion = df["Description"]
-    cancelacion = _es_cancelacion(df)
+    cancelacion = es_cancelacion(df)
     descripciones_por_codigo = df.groupby("StockCode", observed=True)["Description"].transform("nunique")
     return {
         R_FALTANTES: df["CustomerID"].isna() | descripcion.isna(),

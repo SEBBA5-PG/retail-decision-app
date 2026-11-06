@@ -17,7 +17,7 @@ import pandas as pd
 
 from services.quality_service import (
     R_CANCELACIONES, R_CANTIDAD, R_DESC_NUMERICA, R_DESC_VARIAS, R_DUPLICADOS, R_NO_PRODUCTO, R_PRECIO,
-    detectar_outliers, es_producto,
+    detectar_outliers, es_cancelacion, es_producto,
 )
 
 COLUMNAS_APARTADOS = ("Motivo",)
@@ -112,7 +112,7 @@ def apartar_valores_invalidos(df: pd.DataFrame) -> ResultadoPaso:
     """Datos ilegibles, precio ≤ 0 y cantidad ≤ 0 sin ser cancelación: ajustes, regalos o daños."""
     df, salen_ilegibles = _apartar(df, df[["InvoiceDate", "Quantity", "Price"]].isna().any(axis=1), "Fecha, cantidad o precio ilegible")
     d1, salen_precio = _apartar(df, df["Price"] <= 0, "Price <= 0")
-    cancelacion1 = d1["Invoice"].str.startswith("C")
+    cancelacion1 = es_cancelacion(d1)
     d2, salen_cantidad = _apartar(d1, (d1["Quantity"] <= 0) & ~cancelacion1, "Quantity <= 0 sin ser cancelación")
     salen = pd.concat([salen_ilegibles, salen_precio, salen_cantidad])
     ilegibles = f"{len(salen_ilegibles):,} ilegibles, " if len(salen_ilegibles) else ""
@@ -126,7 +126,7 @@ def marcar_negocio(df: pd.DataFrame) -> ResultadoPaso:
     """Agrega Ingreso, EsCancelacion, ClienteAnonimo y LineaAtipica sin quitar filas."""
     d = df.assign(
         Ingreso=df["Quantity"].astype("float64") * df["Price"].astype("float64"),
-        EsCancelacion=df["Invoice"].str.startswith("C"),
+        EsCancelacion=es_cancelacion(df),
         ClienteAnonimo=df["CustomerID"].isna(),
     )
     d["LineaAtipica"] = detectar_outliers(d)

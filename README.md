@@ -20,4 +20,4 @@ streamlit run app.py
 
 ## Qué espera la app
 
-Una fila por línea de venta con factura, código y nombre de producto, cantidad, fecha, precio y país; el cliente es opcional. Las facturas de cancelación empiezan con «C» (convención de UCI). Los importes se muestran con £.
+Una fila por línea de venta con factura, código y nombre de producto, cantidad, fecha, precio y país; el cliente es opcional. Las facturas de cancelación son una «C» seguida de dígitos, como C581484 (convención de UCI). Los importes se muestran con £.

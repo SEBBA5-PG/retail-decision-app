@@ -62,5 +62,11 @@ def test_cargar_errores(tmp_path):
 
 def test_es_producto_no_aparta_catalogos_con_otro_formato():
     from services.quality_service import es_producto
-    d = pd.DataFrame({"StockCode": ["ABC-001", "ABC-002", "XY-77", "POSTAGE", "GIFT_0001", "SKU9"]})
-    assert es_producto(d).tolist() == [True, True, True, False, False, True]
+    d = pd.DataFrame({"StockCode": ["ABC-001", "ABC-002", "XY-77", "POSTAGE", "GIFT_0001", "SKU9", "USB-C Cable"]})
+    assert es_producto(d).tolist() == [True, True, True, False, False, True, True]
+
+
+def test_cancelacion_exige_c_y_digitos():
+    from services.quality_service import es_cancelacion
+    d = pd.DataFrame({"Invoice": ["C581484", "581484", "CA-2016-152156", "A563185"]})
+    assert es_cancelacion(d).tolist() == [True, False, False, False]

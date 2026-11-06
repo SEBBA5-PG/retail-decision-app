@@ -41,13 +41,18 @@ def _indicadores(_df, clave):
     mensual = kpi.ingresos_mensuales(_df)
     pareto = kpi.pareto_productos(_df)
     paises = kpi.ingresos_por_pais(_df)
-    clientes = kpi.clientes_nuevos_recurrentes(_df)
-    segmentos = kpi.resumen_segmentos(kpi.rfm(_df))
-    devoluciones = kpi.devoluciones_mensuales(_df)
-    devueltos = kpi.productos_mas_devueltos(_df)
+    # Sin cliente identificado o sin cancelaciones, esas secciones no tienen de qué calcularse: se omiten con aviso.
+    hay_clientes = _df.loc[~_df["ClienteAnonimo"] & ~_df["EsCancelacion"], "CustomerID"].nunique() >= 10
+    hay_devoluciones = bool(_df["EsCancelacion"].any())
+    clientes = kpi.clientes_nuevos_recurrentes(_df) if hay_clientes else None
+    if clientes is not None and len(clientes) < 2:
+        clientes = None
+    segmentos = kpi.resumen_segmentos(kpi.rfm(_df)) if hay_clientes else None
+    devoluciones = kpi.devoluciones_mensuales(_df) if hay_devoluciones else None
+    devueltos = kpi.productos_mas_devueltos(_df) if hay_devoluciones else None
     dia_hora = kpi.ventas_dia_hora(_df)
     facturas = kpi.distribucion_facturas(_df)
-    cohortes = kpi.retencion_cohortes(_df)
+    cohortes = kpi.retencion_cohortes(_df) if hay_clientes else None
     juntos = kpi.productos_juntos(_df)
     tendencia = kpi.productos_tendencia(_df)
     return {
@@ -57,8 +62,9 @@ def _indicadores(_df, clave):
         "lecturas": {
             "mensual": kpi.lectura_mensual(mensual), "ticket": kpi.lectura_ticket(mensual),
             "pareto": kpi.lectura_pareto(pareto), "paises": kpi.lectura_paises(paises),
-            "clientes": kpi.lectura_clientes(clientes), "rfm": kpi.lectura_rfm(segmentos),
-            "devoluciones": kpi.lectura_devoluciones(_df, devoluciones, devueltos),
+            "clientes": kpi.lectura_clientes(clientes) if clientes is not None else None,
+            "rfm": kpi.lectura_rfm(segmentos) if segmentos is not None else None,
+            "devoluciones": kpi.lectura_devoluciones(_df, devoluciones, devueltos) if devoluciones is not None else None,
             "dia_hora": kpi.lectura_dia_hora(dia_hora),
             "facturas": kpi.lectura_facturas(facturas) if facturas else None,
             "cohortes": kpi.lectura_cohortes(cohortes) if cohortes else None,
@@ -367,26 +373,36 @@ elif seccion == SECCIONES[3]:
         _grafico(graficos.fig_paises(ind["paises"]), lecturas["paises"])
 
         st.header("Clientes")
-        _grafico(graficos.fig_clientes(ind["clientes"]), lecturas["clientes"])
-        st.caption(
-            f"Se omite {df['InvoiceDate'].min():%Y-%m}, el primer mes del dataset: sin historial previo, todos los clientes parecerían nuevos."
-        )
-        if ind["cohortes"]:
-            _grafico(graficos.fig_cohortes(ind["cohortes"]), lecturas["cohortes"])
-            st.caption("Cada fila es el grupo de clientes que compró por primera vez ese mes; cada columna, los meses después. Se omite el primer mes del archivo (mezcla a todos los clientes previos).")
-        _grafico(graficos.fig_segmentos(ind["segmentos"]), lecturas["rfm"])
-        st.caption(
-            "Segmentos RFM por recencia y frecuencia de compra (puntajes 1 a 5). Solo clientes identificados; "
-            "los anónimos no tienen historial y quedan fuera."
-        )
+        if ind["segmentos"] is None:
+            st.info(
+                "Tu archivo no identifica a los clientes (o son menos de 10), así que se omiten los gráficos de clientes nuevos y "
+                "recurrentes, retención y segmentos RFM. Para verlos hace falta una columna con el identificador del cliente."
+            )
+        else:
+            if ind["clientes"] is not None:
+                _grafico(graficos.fig_clientes(ind["clientes"]), lecturas["clientes"])
+                st.caption(
+                    f"Se omite {df['InvoiceDate'].min():%Y-%m}, el primer mes del dataset: sin historial previo, todos los clientes parecerían nuevos."
+                )
+            if ind["cohortes"]:
+                _grafico(graficos.fig_cohortes(ind["cohortes"]), lecturas["cohortes"])
+                st.caption("Cada fila es el grupo de clientes que compró por primera vez ese mes; cada columna, los meses después. Se omite el primer mes del archivo (mezcla a todos los clientes previos).")
+            _grafico(graficos.fig_segmentos(ind["segmentos"]), lecturas["rfm"])
+            st.caption(
+                "Segmentos RFM por recencia y frecuencia de compra (puntajes 1 a 5). Solo clientes identificados; "
+                "los anónimos no tienen historial y quedan fuera."
+            )
 
         st.header("Devoluciones")
-        izquierda, derecha = st.columns(2)
-        with izquierda:
-            st.plotly_chart(graficos.fig_tasa_devoluciones(ind["devoluciones"]), width="stretch")
-        with derecha:
-            st.plotly_chart(graficos.fig_top_devueltos(ind["devueltos"]), width="stretch")
-        st.info(f"**Qué hacer:** {lecturas['devoluciones']}")
+        if ind["devoluciones"] is None:
+            st.info("Tu archivo no tiene cancelaciones (facturas que empiezan con «C» y dígitos), así que no hay devoluciones que analizar.")
+        else:
+            izquierda, derecha = st.columns(2)
+            with izquierda:
+                st.plotly_chart(graficos.fig_tasa_devoluciones(ind["devoluciones"]), width="stretch")
+            with derecha:
+                st.plotly_chart(graficos.fig_top_devueltos(ind["devueltos"]), width="stretch")
+            st.info(f"**Qué hacer:** {lecturas['devoluciones']}")
 
         st.header("Cuándo compran")
         _grafico(graficos.fig_dia_hora(ind["dia_hora"]), lecturas["dia_hora"])
