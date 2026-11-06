@@ -4,6 +4,7 @@ Con un millón de filas, las reglas devuelven máscaras booleanas (no copias del
 DataFrame); la interfaz corta con `df[mascara]` solo lo que va a mostrar.
 """
 
+import numpy as np
 import pandas as pd
 
 # Códigos de producto de Online Retail II: 5 dígitos con 0 a 2 letras opcionales.
@@ -17,6 +18,10 @@ R_PRECIO = "Price <= 0"
 R_NO_PRODUCTO = "StockCode que no es un producto"
 R_DESC_NUMERICA = "Description solo numérica"
 R_DESC_VARIAS = "StockCode con varias Description"
+
+# Si menos del 90 % de los códigos sigue el patrón de UCI, se usa una regla general:
+# código sin ningún dígito o con palabras de servicio (envío, comisión, ajuste, prueba, vale).
+GENERICO_NO_PRODUCTO = r"(?i)^(gift|test|adjust|amazonfee|bank charges|postage|manual|dotcom|shipping|envio|flete)"
 
 # Reglas que deben quedar en cero para considerar el dataset limpio de errores.
 REGLAS_DE_NEGOCIO = (R_CANTIDAD, R_PRECIO, R_NO_PRODUCTO, R_DESC_NUMERICA)
@@ -42,6 +47,24 @@ def perfilar_dataset(df: pd.DataFrame) -> dict:
     }
 
 
+def es_producto(df: pd.DataFrame) -> pd.Series:
+    """True donde StockCode es un producto vendido y no un cargo (envío, comisión, ajuste).
+
+    Con códigos al estilo UCI se usa su patrón exacto; con otro catálogo, una regla general
+    para no apartar productos legítimos solo porque su código se escribe distinto.
+    """
+    codigo = df["StockCode"].astype("category")
+    categorias = pd.Series(codigo.cat.categories.astype(str))
+    segun_patron = categorias.str.match(PATRON_PRODUCTO)
+    if segun_patron.mean() >= 0.9:
+        validas = segun_patron
+    else:
+        validas = categorias.str.contains(r"\d") & ~categorias.str.match(GENERICO_NO_PRODUCTO)
+    codigos = codigo.cat.codes.to_numpy()
+    resultado = np.where(codigos >= 0, validas.to_numpy(bool)[codigos], False)
+    return pd.Series(resultado, index=df.index)
+
+
 def _es_cancelacion(df: pd.DataFrame) -> pd.Series:
     return df["Invoice"].astype(str).str.startswith("C")
 
@@ -54,7 +77,6 @@ def detectar_problemas(df: pd.DataFrame) -> dict[str, pd.Series]:
     """
     descripcion = df["Description"]
     cancelacion = _es_cancelacion(df)
-    codigo = df["StockCode"].astype(str)
     descripciones_por_codigo = df.groupby("StockCode", observed=True)["Description"].transform("nunique")
     return {
         R_FALTANTES: df["CustomerID"].isna() | descripcion.isna(),
@@ -62,7 +84,7 @@ def detectar_problemas(df: pd.DataFrame) -> dict[str, pd.Series]:
         R_CANCELACIONES: cancelacion,
         R_CANTIDAD: (df["Quantity"] <= 0) & ~cancelacion,
         R_PRECIO: df["Price"] <= 0,
-        R_NO_PRODUCTO: ~codigo.str.match(PATRON_PRODUCTO),
+        R_NO_PRODUCTO: ~es_producto(df),
         R_DESC_NUMERICA: descripcion.astype("str").str.fullmatch(r"\d+").fillna(False),
         R_DESC_VARIAS: descripciones_por_codigo > 1,
     }

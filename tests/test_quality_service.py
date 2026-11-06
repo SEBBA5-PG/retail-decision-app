@@ -56,5 +56,11 @@ def test_cargar_errores(tmp_path):
         cargar_dataset(vacio)
     otro = tmp_path / "otro.csv"
     otro.write_text("a,b\n1,2\n")
-    with pytest.raises(ErrorDeCarga, match="Faltan columnas"):
+    with pytest.raises(ErrorDeCarga, match="No se reconocieron"):
         cargar_dataset(otro)
+
+
+def test_es_producto_no_aparta_catalogos_con_otro_formato():
+    from services.quality_service import es_producto
+    d = pd.DataFrame({"StockCode": ["ABC-001", "ABC-002", "XY-77", "POSTAGE", "GIFT_0001", "SKU9"]})
+    assert es_producto(d).tolist() == [True, True, True, False, False, True]

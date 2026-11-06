@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-RUTA_POR_DEFECTO = Path(__file__).resolve().parent.parent / "data" / "retail_raw.parquet"
+RUTA_EJEMPLO = Path(__file__).resolve().parent.parent / "data" / "retail_raw.parquet"
 CODIFICACIONES = ("utf-8-sig", "utf-8", "latin-1")
 COLUMNAS_ESPERADAS = (
     "Invoice", "StockCode", "Description", "Quantity",
@@ -44,11 +44,49 @@ def _compactar(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def cargar_dataset(origen=RUTA_POR_DEFECTO) -> pd.DataFrame:
-    """Lee una ruta o un archivo subido en Streamlit y devuelve un DataFrame.
+def _normalizar_nombre(nombre) -> str:
+    return "".join(ch for ch in str(nombre).lower() if ch.isalnum())
 
-    Si no se puede leer o no tiene las columnas de Online Retail II, lanza ErrorDeCarga.
-    """
+
+# Nombres con los que suelen llegar las columnas en otros conjuntos de datos de ventas.
+ALIAS = {
+    "Invoice": ("invoice", "invoiceno", "invoicenumber", "factura", "numerofactura", "nofactura", "orderid", "order", "pedido"),
+    "StockCode": ("stockcode", "sku", "productcode", "codigoproducto", "codigo", "productid", "itemcode", "referencia"),
+    "Description": ("description", "descripcion", "producto", "product", "productname", "nombreproducto", "item"),
+    "Quantity": ("quantity", "qty", "cantidad", "unidades", "units"),
+    "InvoiceDate": ("invoicedate", "date", "fecha", "fechafactura", "orderdate", "fechaventa", "fechapedido"),
+    "Price": ("price", "unitprice", "precio", "preciounitario", "valorunitario"),
+    "CustomerID": ("customerid", "customer", "cliente", "idcliente", "clientid", "codigocliente"),
+    "Country": ("country", "pais", "nacion"),
+}
+OPCIONALES = ("CustomerID",)
+
+
+class ErrorColumnas(ErrorDeCarga):
+    """Faltan columnas que no se pudieron reconocer: la interfaz pide al usuario que las indique."""
+
+    def __init__(self, faltan, columnas):
+        super().__init__(f"No se reconocieron estas columnas: {', '.join(faltan)}.")
+        self.faltan = list(faltan)
+        self.columnas = list(columnas)
+
+
+def sugerir_mapeo(columnas) -> dict[str, str | None]:
+    """Campo esperado -> columna del archivo (o None si no se reconoce)."""
+    por_nombre = {_normalizar_nombre(c): c for c in columnas}
+    mapeo = {}
+    for campo in COLUMNAS_ESPERADAS:
+        for alias in (_normalizar_nombre(campo),) + ALIAS[campo]:
+            if alias in por_nombre:
+                mapeo[campo] = por_nombre[alias]
+                break
+        else:
+            mapeo[campo] = None
+    return mapeo
+
+
+def leer_crudo(origen) -> pd.DataFrame:
+    """Lee Parquet, CSV o Excel sin validar columnas."""
     extension = _extension(origen)
     try:
         if extension == ".parquet":
@@ -65,14 +103,46 @@ def cargar_dataset(origen=RUTA_POR_DEFECTO) -> pd.DataFrame:
         raise ErrorDeCarga("El archivo está vacío.")
     except pd.errors.ParserError as error:
         raise ErrorDeCarga(f"El archivo no tiene formato válido: {error}")
-
-    df = df.rename(columns={"Customer ID": "CustomerID"})
     if df.empty:
         raise ErrorDeCarga("El archivo no contiene filas de datos.")
-    faltan = [c for c in COLUMNAS_ESPERADAS if c not in df.columns]
+    return df
+
+
+def _convertir(serie: pd.Series, como: str, campo: str, columna: str) -> pd.Series:
+    """Convierte a fecha o número; si casi nada se puede convertir, la columna elegida no es la correcta."""
+    convertida = pd.to_datetime(serie, errors="coerce") if como == "fecha" else pd.to_numeric(serie, errors="coerce")
+    perdidos = convertida.isna() & serie.notna()
+    if perdidos.mean() > 0.3:
+        tipo = "fecha" if como == "fecha" else "número"
+        raise ErrorDeCarga(f"La columna «{columna}» no parece un {tipo} ({campo}): más del 30 % de sus valores no se pudo leer.")
+    return convertida
+
+
+def preparar(df: pd.DataFrame, mapeo: dict[str, str | None] | None = None) -> pd.DataFrame:
+    """Renombra al esquema de la app, convierte tipos y compacta. Lanza ErrorColumnas si falta algo."""
+    df = df.rename(columns={"Customer ID": "CustomerID"})
+    mapeo = {**sugerir_mapeo(df.columns), **(mapeo or {})}
+    faltan = [c for c in COLUMNAS_ESPERADAS if mapeo.get(c) is None and c not in OPCIONALES]
     if faltan:
-        raise ErrorDeCarga(f"Faltan columnas de Online Retail II: {', '.join(faltan)}.")
-    return _compactar(df)
+        raise ErrorColumnas(faltan, df.columns)
+    usadas = [mapeo[c] for c in COLUMNAS_ESPERADAS if mapeo.get(c) is not None]
+    if len(set(usadas)) != len(usadas):
+        raise ErrorDeCarga("Una misma columna del archivo está asignada a dos campos distintos.")
+    salida = pd.DataFrame({c: df[mapeo[c]] for c in COLUMNAS_ESPERADAS if mapeo.get(c) is not None})
+    if "CustomerID" not in salida:
+        salida["CustomerID"] = float("nan")
+    salida["InvoiceDate"] = _convertir(salida["InvoiceDate"], "fecha", "InvoiceDate", mapeo["InvoiceDate"])
+    salida["Quantity"] = _convertir(salida["Quantity"], "numero", "Quantity", mapeo["Quantity"])
+    salida["Price"] = _convertir(salida["Price"], "numero", "Price", mapeo["Price"])
+    return _compactar(salida[list(COLUMNAS_ESPERADAS)])
+
+
+def cargar_dataset(origen, mapeo: dict[str, str | None] | None = None) -> pd.DataFrame:
+    """Lee una ruta o un archivo subido y devuelve un DataFrame con el esquema de la app.
+
+    Si no se puede leer o faltan columnas, lanza ErrorDeCarga (ErrorColumnas si se puede resolver mapeándolas).
+    """
+    return preparar(leer_crudo(origen), mapeo)
 
 
 def exportar_csv(df: pd.DataFrame) -> bytes:

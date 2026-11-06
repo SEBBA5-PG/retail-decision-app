@@ -15,7 +15,10 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from services.quality_service import PATRON_PRODUCTO, detectar_outliers
+from services.quality_service import (
+    R_CANCELACIONES, R_CANTIDAD, R_DESC_NUMERICA, R_DESC_VARIAS, R_DUPLICADOS, R_NO_PRODUCTO, R_PRECIO,
+    detectar_outliers, es_producto,
+)
 
 COLUMNAS_APARTADOS = ("Motivo",)
 
@@ -100,21 +103,22 @@ def quitar_duplicados(df: pd.DataFrame) -> ResultadoPaso:
 
 def apartar_no_productos(df: pd.DataFrame) -> ResultadoPaso:
     """Envío, comisiones, ajustes y vales: son dinero, no producto vendido."""
-    es_producto = df["StockCode"].str.match(PATRON_PRODUCTO)
-    nuevo, salen = _apartar(df, ~es_producto, "StockCode que no es un producto")
+    nuevo, salen = _apartar(df, ~es_producto(df), "StockCode que no es un producto")
     codigos = salen["StockCode"].astype(str).nunique()
     return ResultadoPaso(nuevo, salen, f"{len(salen):,} líneas de {codigos} códigos que no son producto")
 
 
 def apartar_valores_invalidos(df: pd.DataFrame) -> ResultadoPaso:
-    """Precio ≤ 0 y cantidad ≤ 0 sin ser cancelación: ajustes, regalos o daños."""
+    """Datos ilegibles, precio ≤ 0 y cantidad ≤ 0 sin ser cancelación: ajustes, regalos o daños."""
+    df, salen_ilegibles = _apartar(df, df[["InvoiceDate", "Quantity", "Price"]].isna().any(axis=1), "Fecha, cantidad o precio ilegible")
     d1, salen_precio = _apartar(df, df["Price"] <= 0, "Price <= 0")
     cancelacion1 = d1["Invoice"].str.startswith("C")
     d2, salen_cantidad = _apartar(d1, (d1["Quantity"] <= 0) & ~cancelacion1, "Quantity <= 0 sin ser cancelación")
-    salen = pd.concat([salen_precio, salen_cantidad])
+    salen = pd.concat([salen_ilegibles, salen_precio, salen_cantidad])
+    ilegibles = f"{len(salen_ilegibles):,} ilegibles, " if len(salen_ilegibles) else ""
     return ResultadoPaso(
         d2, salen,
-        f"{len(salen_precio):,} con precio ≤ 0 y {len(salen_cantidad):,} con cantidad ≤ 0 sin cancelación",
+        f"{ilegibles}{len(salen_precio):,} con precio ≤ 0 y {len(salen_cantidad):,} con cantidad ≤ 0 sin cancelación",
     )
 
 
@@ -140,25 +144,45 @@ def marcar_negocio(df: pd.DataFrame) -> ResultadoPaso:
 class Paso:
     clave: str
     titulo: str
-    por_que: str
+    problema: str   # qué anda mal, en palabras de negocio
+    que_hace: str   # qué se hace exactamente
+    que_pasa: str   # qué pasa con las filas afectadas
+    por_que: str    # por qué importa para las decisiones
+    reglas: tuple   # reglas de calidad cuyo conteo muestra «lo detectado»
     funcion: Callable[[pd.DataFrame], ResultadoPaso]
 
 
 PASOS = (
-    Paso("texto", "Normalizar Description",
-         "El mismo producto aparece escrito de varias formas; se unifica a la más frecuente por StockCode. "
-         "Los textos solo numéricos no describen nada y pasan a nulo.", normalizar_texto),
-    Paso("duplicados", "Quitar duplicados exactos",
-         "Una fila idéntica a otra repite una venta. Se hace después de normalizar para atrapar los duplicados ocultos.",
-         quitar_duplicados),
-    Paso("no_producto", "Apartar códigos que no son producto",
-         "Envío, comisiones y ajustes inflan ingresos y distorsionan el ranking de productos. Se guardan aparte.",
-         apartar_no_productos),
-    Paso("invalidos", "Apartar precios y cantidades inválidas",
-         "Precio ≤ 0 y cantidad negativa sin factura de cancelación no son ventas. Las cancelaciones se conservan.",
-         apartar_valores_invalidos),
-    Paso("marcas", "Marcar cancelaciones, clientes anónimos y atípicas",
-         "Son información de negocio: se conservan con una marca, nunca se borran.", marcar_negocio),
+    Paso("texto", "Unificar nombres de producto",
+         "El mismo producto aparece escrito de varias formas (mayúsculas, espacios, versiones distintas).",
+         "Se limpian espacios y mayúsculas y se deja una sola descripción por código de producto: la más frecuente.",
+         "No sale ninguna fila: solo cambia el texto. Las descripciones que son solo números pasan a vacías.",
+         "Sin esto, un mismo producto se cuenta como varios y el ranking de ventas sale partido.",
+         (R_DESC_VARIAS, R_DESC_NUMERICA), normalizar_texto),
+    Paso("duplicados", "Quitar filas repetidas",
+         "Hay filas idénticas a otra: la misma venta registrada dos veces.",
+         "Se conserva la primera copia y se aparta el resto.",
+         "Las copias sobrantes se guardan aparte con el motivo «Duplicado exacto».",
+         "Una venta contada dos veces infla ingresos y unidades.",
+         (R_DUPLICADOS,), quitar_duplicados),
+    Paso("no_producto", "Apartar cargos que no son producto",
+         "Envíos, comisiones, ajustes y vales aparecen como si fueran productos.",
+         "Se reconocen por su código (el patrón de UCI o, en otros catálogos, códigos sin dígitos o con palabras de servicio).",
+         "Se apartan con el motivo «StockCode que no es un producto». Es dinero real, pero no producto vendido.",
+         "Distorsionan el ranking de productos y el ticket promedio.",
+         (R_NO_PRODUCTO,), apartar_no_productos),
+    Paso("invalidos", "Apartar precios y cantidades imposibles",
+         "Filas con fecha, cantidad o precio ilegibles, precio en cero o cantidad negativa sin ser cancelación.",
+         "Se aplican reglas de negocio simples: precio mayor a cero y cantidad mayor a cero salvo en cancelaciones.",
+         "Se apartan con su motivo. Las cancelaciones (factura que empieza con C) se conservan.",
+         "No son ventas reales: regalos, daños o errores de captura que ensucian los totales.",
+         (R_PRECIO, R_CANTIDAD), apartar_valores_invalidos),
+    Paso("marcas", "Marcar lo que no se borra",
+         "Cancelaciones, clientes anónimos y compras muy grandes sirven al negocio, pero hay que distinguirlas.",
+         "Se agregan cuatro columnas: Ingreso, EsCancelacion, ClienteAnonimo y LineaAtipica.",
+         "No sale ninguna fila: solo se marcan, para poder incluirlas o excluirlas en cada gráfico.",
+         "Permite medir devoluciones, analizar clientes sin mezclar anónimos y revisar compras atípicas.",
+         (R_CANCELACIONES,), marcar_negocio),
 )
 CLAVES = tuple(p.clave for p in PASOS)
 _POR_CLAVE = {p.clave: p for p in PASOS}

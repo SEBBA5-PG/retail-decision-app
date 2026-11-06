@@ -5,6 +5,7 @@ serie principal y naranja para el contraste (devoluciones, recurrentes), y leyen
 siempre que hay dos series. Streamlit aplica su tema claro u oscuro sobre el fondo.
 """
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -128,3 +129,64 @@ def fig_dia_hora(tabla: pd.DataFrame) -> go.Figure:
         hovertemplate="%{y} %{x}<br>£%{z:,.0f}<extra></extra>"))
     fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
     return _base(fig, "Ventas por día y hora", alto=340)
+
+
+# ------------------------------------------------ proceso de limpieza y decisiones nuevas
+
+def fig_apartadas(motivos: pd.Series, n_original: int) -> go.Figure:
+    """Filas apartadas por motivo. Barras y no cascada: lo apartado suele ser un 1 % del total y en una cascada no se vería."""
+    m = motivos.iloc[::-1]
+    fig = go.Figure(go.Bar(
+        x=m.values, y=list(m.index), orientation="h", marker_color=NARANJA,
+        customdata=100 * m.values / n_original,
+        hovertemplate="%{y}<br>%{x:,.0f} filas (%{customdata:.2f} % del archivo)<extra></extra>"))
+    fig.update_xaxes(tickformat=",.0f")
+    return _base(fig, "Filas apartadas por motivo", alto=max(220, 70 * len(m) + 110))
+
+
+def fig_facturas(d: dict) -> go.Figure:
+    h = d["hist"]
+    centro = (h["Desde"] + h["Hasta"]) / 2
+    fig = go.Figure(go.Bar(
+        x=centro, y=h["Facturas"], width=(h["Hasta"] - h["Desde"]) * 0.9, marker_color=AZUL,
+        customdata=h[["Desde", "Hasta"]],
+        hovertemplate="£%{customdata[0]:,.0f} a £%{customdata[1]:,.0f}<br>%{y:,} facturas<extra></extra>"))
+    for valor, texto in ((d["mediana"], "mitad de las facturas"), (d["p75"], "umbral sugerido")):
+        fig.add_vline(x=valor, line=dict(color=NARANJA, width=1.5, dash="dot"),
+                      annotation_text=f"{texto}: £{valor:,.0f}", annotation_position="top")
+    fig.update_xaxes(tickprefix="£")
+    return _base(fig, f"Valor de cada factura (hasta £{d['p95']:,.0f}, el 95 % de las facturas)", alto=360)
+
+
+def fig_cohortes(r: dict) -> go.Figure:
+    m = r["matriz"]
+    fig = go.Figure(go.Heatmap(
+        z=m.values, x=[f"Mes {c}" for c in m.columns], y=[f"{c:%Y-%m}" for c in m.index], colorscale=RAMPA_AZUL,
+        zmin=0, zmax=max(0.01, float(np.nanmax(m.values))), xgap=2, ygap=2,
+        colorbar=dict(title="Vuelven", tickformat=".0%"),
+        hovertemplate="Clientes de %{y}<br>%{x}: %{z:.0%} vuelven<extra></extra>"))
+    fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
+    return _base(fig, "Retención: qué parte de cada grupo de clientes nuevos vuelve", alto=max(340, 22 * len(m) + 120))
+
+
+def fig_juntos(t: pd.DataFrame) -> go.Figure:
+    t = t.iloc[::-1]
+    etiqueta = (t["A"].str.slice(0, 24) + "  +  " + t["B"].str.slice(0, 24))
+    fig = go.Figure(go.Bar(
+        x=t["Confianza"], y=etiqueta, orientation="h", marker_color=AZUL,
+        customdata=t[["Facturas", "Lift"]],
+        hovertemplate="%{y}<br>%{x:.0%} de las facturas del menos vendido incluyen al otro<br>"
+                      "%{customdata[0]:,} facturas juntas · lift %{customdata[1]:.0f}<extra></extra>"))
+    fig.update_xaxes(tickformat=".0%")
+    return _base(fig, "Productos que se compran juntos", alto=420)
+
+
+def fig_tendencia(r: dict) -> go.Figure:
+    fig = go.Figure()
+    suben, caen = r["suben"].iloc[::-1], r["caen"]
+    fig.add_bar(x=caen["Cambio"], y=caen["Producto"].str.slice(0, 34), orientation="h", name="Caen", marker_color=NARANJA,
+                hovertemplate="%{y}<br>−£%{customdata:,.0f}<extra></extra>", customdata=-caen["Cambio"])
+    fig.add_bar(x=suben["Cambio"], y=suben["Producto"].str.slice(0, 34), orientation="h", name="Suben", marker_color=AZUL,
+                hovertemplate="%{y}<br>+£%{x:,.0f}<extra></extra>")
+    fig.update_xaxes(tickprefix="£", tickformat=",.0s")
+    return _base(fig, f"Productos que suben y caen (últimos {r['meses']} meses frente a los {r['meses']} anteriores)", alto=460, leyenda=True)

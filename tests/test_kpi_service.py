@@ -71,3 +71,69 @@ def test_devoluciones(limpio):
 
 def test_dia_hora_tiene_siete_filas(limpio):
     assert len(ventas_dia_hora(limpio)) == 7
+
+
+# ------------------------------------------------ indicadores de decisión nuevos
+
+import numpy as np
+
+from services.kpi_service import (
+    distribucion_facturas, lectura_cohortes, lectura_facturas, lectura_juntos, lectura_tendencia,
+    productos_juntos, productos_tendencia, retencion_cohortes,
+)
+
+
+@pytest.fixture
+def grande():
+    """Ocho meses de ventas sintéticas con un par de productos que siempre van juntos."""
+    rng = np.random.default_rng(0)
+    filas, n = [], 0
+    for mes in range(1, 9):
+        for _ in range(60):
+            n += 1
+            cliente = float(rng.integers(1, 40))
+            fecha = pd.Timestamp(2011, mes, int(rng.integers(1, 28)), 10)
+            items = ["10001", "10002"] if rng.random() < 0.5 else [f"2{rng.integers(1000, 1010)}"]
+            for codigo in items:
+                filas.append((str(5000 + n), codigo, f"PRODUCTO {codigo}", int(rng.integers(1, 6)), fecha, 3.0, cliente, "United Kingdom"))
+    filas.append(("5999", "10001", "PRODUCTO 10001", 1, pd.Timestamp(2011, 9, 30, 10), 3.0, 1.0, "United Kingdom"))
+    df = pd.DataFrame(filas, columns=["Invoice", "StockCode", "Description", "Quantity", "InvoiceDate", "Price", "CustomerID", "Country"])
+    limpio, _, _ = aplicar_pasos(df, list(CLAVES))
+    return limpio
+
+
+def test_facturas_distribucion(grande):
+    d = distribucion_facturas(grande)
+    assert d["hist"]["Facturas"].sum() + d["sobre_p95"] == d["facturas"]
+    assert d["mediana"] <= d["p75"] <= d["p90"] <= d["p95"]
+    assert "£" in lectura_facturas(d)
+
+
+def test_cohortes_retencion_en_rango(grande):
+    r = retencion_cohortes(grande)
+    assert r is not None
+    assert (r["matriz"].stack().dropna().between(0, 1)).all()
+    assert r["retencion"].dropna().between(0, 1).all()
+    assert "100 clientes nuevos" in lectura_cohortes(r)
+
+
+def test_productos_juntos_encuentra_el_par(grande):
+    t = productos_juntos(grande)
+    assert t is not None
+    primero = t.iloc[0]
+    assert {primero["A"], primero["B"]} == {"Producto 10001", "Producto 10002"}
+    assert primero["Lift"] > 1 and 0 < primero["Confianza"] <= 1
+    assert "paquete" in lectura_juntos(t)
+
+
+def test_tendencia_suma_y_resta(grande):
+    r = productos_tendencia(grande)
+    assert r is not None and r["meses"] == 4  # 8 meses completos: min(6, 8 // 2)
+    assert (r["suben"]["Cambio"] > 0).all() and (r["caen"]["Cambio"] < 0).all()
+    assert lectura_tendencia(r)
+
+
+def test_datos_insuficientes_devuelven_none(limpio):
+    assert retencion_cohortes(limpio) is None
+    assert productos_tendencia(limpio) is None
+    assert distribucion_facturas(limpio) is None

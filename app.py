@@ -7,7 +7,10 @@ import streamlit as st
 from services import chart_service as graficos
 from services import kpi_service as kpi
 from services.cleaning_service import PASOS, aplicar_pasos
-from services.data_loader import ErrorDeCarga, cargar_dataset, exportar_csv, exportar_parquet
+from services.data_loader import (
+    COLUMNAS_ESPERADAS, OPCIONALES, RUTA_EJEMPLO, ErrorColumnas, ErrorDeCarga,
+    cargar_dataset, exportar_csv, exportar_parquet, sugerir_mapeo,
+)
 from services.quality_service import (
     detectar_outliers,
     detectar_problemas,
@@ -20,9 +23,10 @@ st.set_page_config(page_title="Retail Data Decisions", page_icon="🛒", layout=
 
 
 # cache_resource evita copiar el millón de filas en cada interacción; los servicios nunca mutan el original.
-@st.cache_resource(show_spinner="Cargando el dataset…")
-def _cargar_por_defecto():
-    return cargar_dataset()
+# max_entries=2: se pueden alternar dos datasets sin releer, pero no se acumulan en memoria.
+@st.cache_resource(show_spinner="Leyendo el archivo…", max_entries=2)
+def _cargar(_archivo, id_archivo, mapeo):
+    return cargar_dataset(_archivo, dict(mapeo) if mapeo else None)
 
 
 # max_entries=1: cada entrada guarda máscaras de un millón de filas; solo importa el estado actual.
@@ -42,7 +46,12 @@ def _indicadores(_df, clave):
     devoluciones = kpi.devoluciones_mensuales(_df)
     devueltos = kpi.productos_mas_devueltos(_df)
     dia_hora = kpi.ventas_dia_hora(_df)
+    facturas = kpi.distribucion_facturas(_df)
+    cohortes = kpi.retencion_cohortes(_df)
+    juntos = kpi.productos_juntos(_df)
+    tendencia = kpi.productos_tendencia(_df)
     return {
+        "facturas": facturas, "cohortes": cohortes, "juntos": juntos, "tendencia": tendencia,
         "mensual": mensual, "pareto": pareto, "paises": paises, "clientes": clientes,
         "segmentos": segmentos, "devoluciones": devoluciones, "devueltos": devueltos, "dia_hora": dia_hora,
         "lecturas": {
@@ -51,6 +60,10 @@ def _indicadores(_df, clave):
             "clientes": kpi.lectura_clientes(clientes), "rfm": kpi.lectura_rfm(segmentos),
             "devoluciones": kpi.lectura_devoluciones(_df, devoluciones, devueltos),
             "dia_hora": kpi.lectura_dia_hora(dia_hora),
+            "facturas": kpi.lectura_facturas(facturas) if facturas else None,
+            "cohortes": kpi.lectura_cohortes(cohortes) if cohortes else None,
+            "juntos": kpi.lectura_juntos(juntos) if juntos is not None else None,
+            "tendencia": kpi.lectura_tendencia(tendencia) if tendencia else None,
         },
     }
 
@@ -65,22 +78,90 @@ def _grafico(figura, lectura):
     st.info(f"**Qué hacer:** {lectura}")
 
 
+CAMPOS = {
+    "Invoice": "Número de factura o pedido (las cancelaciones empiezan con «C»)",
+    "StockCode": "Código del producto",
+    "Description": "Nombre del producto",
+    "Quantity": "Unidades vendidas",
+    "InvoiceDate": "Fecha y hora de la venta",
+    "Price": "Precio unitario",
+    "CustomerID": "Identificador del cliente (opcional)",
+    "Country": "País del cliente",
+}
+
 st.title("🛒 Retail Data Decisions")
-st.caption("Online Retail II (UCI, CC BY 4.0) · de datos sucios a decisiones de negocio")
+st.caption("Sube tus datos de ventas, límpialos con explicación paso a paso y obtén gráficos para decidir.")
 
-with st.sidebar:
-    st.header("Datos")
-    subido = st.file_uploader("Cargar otro archivo", type=["parquet", "csv", "xlsx"])
-    st.caption("Sin archivo, se usa el dataset de práctica.")
+# Gancho solo para las pruebas automáticas, que no pueden usar el selector de archivos.
+prueba = st.session_state.get("_origen_prueba")
 
+with st.expander("📁 Tus datasets", expanded=not st.session_state.get("subidos") and prueba is None):
+    subidos = st.file_uploader(
+        "Sube uno o varios archivos de ventas", type=["parquet", "csv", "xlsx"], accept_multiple_files=True, key="subidos",
+    )
+    st.caption(
+        "Formatos: CSV, Excel o Parquet. Hace falta una fila por línea de venta con factura, producto, cantidad, "
+        "fecha, precio y país; el cliente es opcional. Los nombres de columna se reconocen solos (en español o en inglés) "
+        "y, si no, la app te pide indicarlos."
+    )
+    if RUTA_EJEMPLO.exists():
+        st.download_button(
+            "⬇️ ¿No tienes datos? Descarga un dataset de ejemplo (Online Retail II, 1 millón de filas)",
+            lambda: RUTA_EJEMPLO.read_bytes(), "online_retail_II.parquet", "application/octet-stream", on_click="ignore",
+        )
+
+if prueba is None and not subidos:
+    st.subheader("Cómo funciona")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**1 · Sube tus datos**  \nCSV, Excel o Parquet. Puedes cargar varios y alternar entre ellos.")
+    c2.markdown("**2 · Limpia con explicación**  \nCinco pasos: cada uno dice qué problema encontró, qué hace y qué pasa con esas filas. Nada se borra en silencio.")
+    c3.markdown("**3 · Decide**  \nCatorce gráficos con una recomendación calculada con tus datos.")
+    st.subheader("Columnas que necesita")
+    st.dataframe(
+        {"Campo": list(CAMPOS), "Qué es": list(CAMPOS.values())},
+        width="stretch", hide_index=True,
+    )
+    st.stop()
+
+if prueba is not None:
+    archivo, id_archivo = prueba, str(prueba)
+else:
+    if len(subidos) > 1:
+        nombre_activo = st.selectbox("Dataset activo", [f.name for f in subidos])
+        archivo = next(f for f in subidos if f.name == nombre_activo)
+    else:
+        archivo = subidos[0]
+    id_archivo = archivo.file_id
+
+mapeos = st.session_state.setdefault("mapeos", {})
+mapeo = mapeos.get(id_archivo)
 try:
-    original = cargar_dataset(subido) if subido is not None else _cargar_por_defecto()
+    original = _cargar(archivo, id_archivo, tuple(mapeo.items()) if mapeo else None)
+except ErrorColumnas as error:
+    st.warning(f"{error} Indica qué columna de tu archivo corresponde a cada campo.")
+    sugerido = sugerir_mapeo(error.columnas)
+    with st.form(f"mapeo_{id_archivo}"):
+        elegido = {}
+        for campo in COLUMNAS_ESPERADAS:
+            opciones = list(error.columnas) + (["— no tengo esta columna —"] if campo in OPCIONALES else [])
+            previo = sugerido[campo]
+            elegido[campo] = st.selectbox(
+                f"{campo} — {CAMPOS[campo]}", opciones, index=opciones.index(previo) if previo in opciones else None,
+                placeholder="Elige una columna",
+            )
+        if st.form_submit_button("Usar este mapeo", type="primary"):
+            if any(v is None for v in elegido.values()):
+                st.error("Falta elegir al menos una columna obligatoria.")
+            else:
+                mapeos[id_archivo] = {c: (None if v.startswith("—") else v) for c, v in elegido.items()}
+                st.rerun()
+    st.stop()
 except ErrorDeCarga as error:
     st.error(str(error))
     st.stop()
 
-# Estado de la limpieza: se reinicia si cambia el archivo de origen.
-fuente = (subido.name, subido.size) if subido is not None else "defecto"
+# Estado de la limpieza: se reinicia si cambia el archivo de origen o su mapeo de columnas.
+fuente = (id_archivo, tuple(sorted(mapeo.items())) if mapeo else None)
 if st.session_state.get("fuente") != fuente:
     st.session_state.update(fuente=fuente, pasos=[], df=original, apartados=None, detalles=[])
 
@@ -164,23 +245,64 @@ elif seccion == SECCIONES[1]:
 
 elif seccion == SECCIONES[2]:
     aplicados = st.session_state.pasos
-    st.caption(
-        "Los pasos van en orden y ninguno se aplica sin tu confirmación. "
-        "Lo que sale del dataset se aparta con su motivo; las cancelaciones y los clientes anónimos se conservan marcados."
+    st.markdown(
+        "**Limpiar es corregir lo que distorsiona tus números.** Son cinco pasos, siempre en el mismo orden. "
+        "En cada uno verás qué problema hay, cuántas filas toca, qué se hace con ellas y por qué importa. "
+        "**Nada se borra en silencio:** lo que sale del dataset se guarda aparte con su motivo, y se puede deshacer."
     )
+    st.progress(len(aplicados) / len(PASOS), text=f"{len(aplicados)} de {len(PASOS)} pasos aplicados")
+
     if len(aplicados) < len(PASOS):
-        paso = PASOS[len(aplicados)]
+        _, resumen, _ = _diagnosticar(df, clave_estado)
+        casos = dict(zip(resumen["Problema"], resumen["Casos"]))
+        pendientes = PASOS[len(aplicados):]
+        paso = pendientes[0]
+        detectado = [casos[r] for r in paso.reglas]
+        n_detectado = max(detectado) if paso.clave == "texto" else sum(detectado)
         with st.container(border=True):
             st.subheader(f"Paso {len(aplicados) + 1} de {len(PASOS)} · {paso.titulo}")
-            st.write(paso.por_que)
-            confirmo = st.checkbox("Confirmo que quiero aplicar este paso", key=f"conf_{paso.clave}")
-            if st.button("Aplicar paso", type="primary", disabled=not confirmo):
+            st.markdown(f"**El problema.** {paso.problema}")
+            st.markdown(
+                f"**Lo que encontramos en tu archivo.** {n_detectado:,} filas ({100 * n_detectado / len(df):.1f} %)."
+                if n_detectado else "**Lo que encontramos en tu archivo.** Nada que corregir en este paso: se aplica sin cambios."
+            )
+            st.markdown(f"**Qué hacemos.** {paso.que_hace}")
+            st.markdown(f"**Qué pasa con esas filas.** {paso.que_pasa}")
+            st.markdown(f"**Por qué importa.** {paso.por_que}")
+            confirmo = st.checkbox("Entiendo el paso y quiero aplicarlo", key=f"conf_{paso.clave}")
+            if st.button("Aplicar este paso", type="primary", disabled=not confirmo):
                 st.session_state.pasos = aplicados + [paso.clave]
                 with st.spinner("Aplicando…"):
                     _reconstruir()
                 st.rerun()
+        with st.expander("¿Prefieres no revisarlos uno a uno?"):
+            st.write(
+                "Aplica de una vez los pasos que faltan: " + ", ".join(f"«{q.titulo.lower()}»" for q in pendientes)
+                + ". El resultado es idéntico al de ir paso a paso, y puedes deshacer desde la barra lateral."
+            )
+            todos = st.checkbox("Entiendo lo que hacen y quiero aplicarlos todos", key="conf_todos")
+            if st.button("✨ Aplicar los pasos que faltan", disabled=not todos):
+                st.session_state.pasos = aplicados + [q.clave for q in pendientes]
+                with st.spinner("Aplicando los pasos…"):
+                    _reconstruir()
+                st.rerun()
     else:
-        st.success("Se aplicaron todos los pasos de limpieza.")
+        st.success("Listo: se aplicaron todos los pasos. Ve a **Decisiones** para ver los gráficos.")
+
+    apartados = st.session_state.apartados
+    n_apartadas = 0 if apartados is None else len(apartados)
+    if aplicados:
+        st.subheader("Qué pasó con tus datos")
+        motivos = apartados["Motivo"].value_counts() if apartados is not None else None
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Filas originales", f"{len(original):,}")
+        m2.metric("Filas apartadas", f"{n_apartadas:,}", f"-{100 * n_apartadas / len(original):.1f} %", delta_color="off")
+        m3.metric("Filas que quedan", f"{len(df):,}")
+        if motivos is not None and len(motivos):
+            st.plotly_chart(graficos.fig_apartadas(motivos, len(original)), width="stretch")
+            st.caption("Cada barra es un motivo. Las filas apartadas no se pierden: se descargan en Exportar para auditar la limpieza.")
+        else:
+            st.info("Hasta ahora ningún paso apartó filas: todas se conservaron.")
 
     st.subheader("Antes y después")
     validacion_antes = _validacion(original, (fuente, ()))
@@ -199,12 +321,8 @@ elif seccion == SECCIONES[2]:
             "para usarlos en ingresos y excluirlos del análisis de clientes."
         )
 
-    apartados = st.session_state.apartados
-    if apartados is not None and len(apartados):
-        st.subheader(f"Apartados — {len(apartados):,} filas")
-        st.dataframe(apartados["Motivo"].value_counts().rename_axis("Motivo").reset_index(name="Filas"),
-                     width="stretch", hide_index=True)
-        with st.expander("Ver una muestra de lo apartado"):
+    if n_apartadas:
+        with st.expander(f"Ver una muestra de las {n_apartadas:,} filas apartadas"):
             st.dataframe(apartados.head(200), width="stretch")
 
 elif seccion == SECCIONES[3]:
@@ -220,7 +338,7 @@ elif seccion == SECCIONES[3]:
         if parcial is not None:
             st.caption(
                 f"Los gráficos mensuales excluyen {parcial:%Y-%m} porque el dataset llega solo hasta {df['InvoiceDate'].max():%Y-%m-%d}. "
-                "Importes en libras (£)."
+                "Los importes se muestran con £ (la moneda del dataset de ejemplo): si tu archivo usa otra, léelos en la tuya."
             )
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Ventas", kpi.libras(mensual["Ventas"].sum()))
@@ -231,6 +349,8 @@ elif seccion == SECCIONES[3]:
         st.header("Ingresos")
         _grafico(graficos.fig_ingresos_mensuales(mensual), lecturas["mensual"])
         _grafico(graficos.fig_ticket(mensual), lecturas["ticket"])
+        if ind["facturas"]:
+            _grafico(graficos.fig_facturas(ind["facturas"]), lecturas["facturas"])
 
         st.header("Productos y mercados")
         izquierda, derecha = st.columns(2)
@@ -239,6 +359,11 @@ elif seccion == SECCIONES[3]:
         with derecha:
             st.plotly_chart(graficos.fig_curva_pareto(ind["pareto"]), width="stretch")
         st.info(f"**Qué hacer:** {lecturas['pareto']}")
+        if ind["tendencia"]:
+            _grafico(graficos.fig_tendencia(ind["tendencia"]), lecturas["tendencia"])
+        if ind["juntos"] is not None:
+            _grafico(graficos.fig_juntos(ind["juntos"]), lecturas["juntos"])
+            st.caption("Confianza: de las facturas del producto menos vendido del par, qué porcentaje incluye también al otro. Solo pares con lift mayor a 1 (se juntan más de lo esperado por azar).")
         _grafico(graficos.fig_paises(ind["paises"]), lecturas["paises"])
 
         st.header("Clientes")
@@ -246,6 +371,9 @@ elif seccion == SECCIONES[3]:
         st.caption(
             f"Se omite {df['InvoiceDate'].min():%Y-%m}, el primer mes del dataset: sin historial previo, todos los clientes parecerían nuevos."
         )
+        if ind["cohortes"]:
+            _grafico(graficos.fig_cohortes(ind["cohortes"]), lecturas["cohortes"])
+            st.caption("Cada fila es el grupo de clientes que compró por primera vez ese mes; cada columna, los meses después. Se omite el primer mes del archivo (mezcla a todos los clientes previos).")
         _grafico(graficos.fig_segmentos(ind["segmentos"]), lecturas["rfm"])
         st.caption(
             "Segmentos RFM por recencia y frecuencia de compra (puntajes 1 a 5). Solo clientes identificados; "
